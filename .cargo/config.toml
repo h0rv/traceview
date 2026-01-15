@@ -1,0 +1,7 @@
+[alias]
+c = "check"
+cl = "clippy --all-targets --all-features"
+t = "test"
+
+[build]
+rustflags = ["-D", "warnings"]
