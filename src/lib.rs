@@ -44,4 +44,6 @@ pub use error::{Result, TraceviewError};
 pub use ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto, extract_session_name};
 pub use models::{Session, Span, SpanEvent, SpanKind};
 pub use sse::{SpanStream, span_sse};
-pub use views::{base_layout, session_detail, sessions_list, span_html};
+pub use views::{
+    app_layout, base_layout, session_detail, sessions_list, sidebar_session_list, span_html,
+};

@@ -166,6 +166,7 @@ pub fn session_detail(session: &Session, spans: &[Span]) -> Markup {
     let summary = calculate_token_summary(spans);
 
     html! {
+        // Session header with name and token summary
         div class="session-header" {
             h2 { (display_name) }
             (token_summary_html(&summary))
@@ -176,21 +177,14 @@ pub fn session_detail(session: &Session, spans: &[Span]) -> Markup {
             }
         }
 
-        div role="group" {
-            button class="filter-btn active" data-filter="all" { "All" }
-            button class="filter-btn outline" data-filter="tools" { "Tools" }
-            button class="filter-btn outline" data-filter="errors" { "Errors" }
-        }
-
-        div class="conversation-container" id="spans-container" data-session-id=(session.id) {
-            @if spans.is_empty() {
-                div class="empty-state" {
-                    p { "No spans recorded yet." }
-                    p { "Spans will appear here as they are received." }
-                }
-            } @else {
-                (conversation_view(spans))
+        // Spans content (container/filters provided by app_layout)
+        @if spans.is_empty() {
+            div class="empty-state" {
+                p { "No spans recorded yet." }
+                p { "Spans will appear here as they are received." }
             }
+        } @else {
+            (conversation_view(spans))
         }
     }
 }
@@ -216,6 +210,8 @@ pub fn span_html(span: &Span) -> Markup {
         div class="span"
             data-kind=(kind_str)
             data-span-id=(span.id)
+            data-start-time=(span.start_time)
+            data-end-time=(span.end_time.map(|t| t.to_string()).unwrap_or_default())
             data-has-error=(if has_error { "true" } else { "false" }) {
 
             div class="span-header" {
@@ -270,7 +266,12 @@ fn tool_span_html(span: &Span, kind_str: &str) -> Markup {
     // Hide wrapper spans with "unknown" tool name - these are pydantic-ai's "running N tools" spans
     if tool_name == "unknown" {
         return html! {
-            div class="span wrapper-span" data-kind=(kind_str) data-span-id=(span.id) data-has-error="false" {}
+            div class="span wrapper-span"
+                data-kind=(kind_str)
+                data-span-id=(span.id)
+                data-start-time=(span.start_time)
+                data-end-time=(span.end_time.map(|t| t.to_string()).unwrap_or_default())
+                data-has-error="false" {}
         };
     }
 
@@ -286,6 +287,8 @@ fn tool_span_html(span: &Span, kind_str: &str) -> Markup {
         div class="span"
             data-kind=(kind_str)
             data-span-id=(span.id)
+            data-start-time=(span.start_time)
+            data-end-time=(span.end_time.map(|t| t.to_string()).unwrap_or_default())
             data-has-error=(if has_error { "true" } else { "false" }) {
 
             details class="tool-details" {
@@ -415,8 +418,9 @@ mod tests {
         let result = session_detail(&session, &spans);
         let html_str = result.into_string();
 
-        assert!(html_str.contains("spans-container"));
-        assert!(html_str.contains("data-session-id=\"test-session\""));
+        // session_detail now returns spans directly without container (app_layout provides it)
+        assert!(html_str.contains("data-kind=\"user\""));
+        assert!(html_str.contains("data-kind=\"assistant\""));
     }
 
     #[test]
@@ -841,20 +845,16 @@ mod tests {
     }
 
     #[test]
-    fn test_session_detail_includes_filter_controls() {
+    fn test_session_detail_does_not_include_filter_controls() {
+        // Filter controls are now in app_layout, not session_detail
         let session = create_test_session();
         let spans = vec![create_test_span(SpanKind::User)];
         let result = session_detail(&session, &spans);
         let html_str = result.into_string();
 
-        // Pico.css uses role="group" for button groups
-        assert!(html_str.contains("role=\"group\""));
-        assert!(html_str.contains("filter-btn"));
-        assert!(html_str.contains("data-filter=\"all\""));
-        assert!(html_str.contains("data-filter=\"tools\""));
-        assert!(html_str.contains("data-filter=\"errors\""));
-        // One button should be active by default
-        assert!(html_str.contains("filter-btn active"));
+        // session_detail should NOT include filter controls (app_layout provides them)
+        assert!(!html_str.contains("filter-btn"));
+        assert!(!html_str.contains("data-filter="));
     }
 
     #[test]
@@ -1141,7 +1141,7 @@ mod tests {
         let result = session_detail(&session, &spans);
         let html_str = result.into_string();
 
-        assert!(html_str.contains("conversation-container"));
+        // session_detail returns conversation view directly (container provided by app_layout)
         assert!(html_str.contains("class=\"conversation\""));
         assert!(html_str.contains("class=\"turn turn-user\""));
         assert!(html_str.contains("class=\"turn turn-assistant\""));

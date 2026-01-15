@@ -261,6 +261,48 @@ impl Database {
         Ok(sessions)
     }
 
+    /// Get sessions with span counts for sidebar display.
+    ///
+    /// Returns sessions ordered by updated_at descending along with
+    /// the count of spans in each session.
+    pub async fn get_sessions_with_counts(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<(Session, i64)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT s.id, s.name, s.created_at, s.updated_at,
+                   COUNT(sp.id) as span_count
+            FROM sessions s
+            LEFT JOIN spans sp ON s.id = sp.session_id
+            GROUP BY s.id
+            ORDER BY s.updated_at DESC
+            LIMIT ? OFFSET ?
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let sessions = rows
+            .into_iter()
+            .map(|r| {
+                let session = Session {
+                    id: r.get("id"),
+                    name: r.get("name"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                };
+                let count: i64 = r.get("span_count");
+                (session, count)
+            })
+            .collect();
+
+        Ok(sessions)
+    }
+
     /// Get all spans for a session, ordered by start_time.
     pub async fn get_spans_by_session(&self, session_id: &str) -> Result<Vec<Span>> {
         let rows = sqlx::query(

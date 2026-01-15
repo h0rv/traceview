@@ -46,6 +46,62 @@ fn session_item(session: &Session) -> Markup {
     }
 }
 
+/// Renders a compact session list for the sidebar.
+///
+/// Shows session name, relative time, and event count badge.
+/// Highlights the currently selected session.
+///
+/// # Arguments
+/// * `sessions` - Slice of (Session, span_count) tuples
+/// * `current_session_id` - ID of the currently viewed session (if any)
+pub fn sidebar_session_list(
+    sessions: &[(Session, i64)],
+    current_session_id: Option<&str>,
+) -> Markup {
+    html! {
+        @if sessions.is_empty() {
+            div class="empty-state" {
+                p { "No sessions yet" }
+            }
+        } @else {
+            @for (session, span_count) in sessions {
+                @let is_active = current_session_id == Some(session.id.as_str());
+                @let item_class = if is_active { "session-item active" } else { "session-item" };
+                li class=(item_class) data-session-id=(session.id) {
+                    a href={ "/sessions/" (session.id) } {
+                        div class="session-item-name" {
+                            (session.name.as_deref().unwrap_or(&session.id))
+                        }
+                        div class="session-item-meta" {
+                            span class="session-time" { (format_relative_time(session.updated_at)) }
+                            span class="event-count" { (span_count) " events" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Formats a Unix nanosecond timestamp into a relative time string.
+///
+/// Returns strings like "Just now", "5m ago", "2h ago", "3d ago".
+fn format_relative_time(nanos: i64) -> String {
+    let secs = nanos / 1_000_000_000;
+    let now_secs = chrono::Utc::now().timestamp();
+    let diff_secs = now_secs.saturating_sub(secs);
+
+    if diff_secs < 60 {
+        "Just now".to_string()
+    } else if diff_secs < 3600 {
+        format!("{}m ago", diff_secs / 60)
+    } else if diff_secs < 86400 {
+        format!("{}h ago", diff_secs / 3600)
+    } else {
+        format!("{}d ago", diff_secs / 86400)
+    }
+}
+
 /// Formats a Unix nanosecond timestamp into a human-readable string.
 fn format_timestamp(nanos: i64) -> String {
     // Convert nanoseconds to seconds and nanoseconds remainder

@@ -28,7 +28,7 @@ use crate::db::Database;
 use crate::error::TraceviewError;
 use crate::ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto, extract_session_name};
 use crate::models::{Session, Span};
-use crate::views::{base_layout, session_detail, sessions_list, span_html};
+use crate::views::{app_layout, session_detail, sidebar_session_list, span_html};
 
 // ============================================================================
 // App State
@@ -258,14 +258,22 @@ async fn stream_session(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
 }
 
-/// HTML index page showing session list.
+/// HTML index page showing session list in sidebar with welcome message.
 async fn index(State(state): State<SharedState>) -> Result<Html<String>, ApiError> {
-    let sessions = state.db.get_sessions(100, 0).await?;
-    let content = sessions_list(&sessions);
-    Ok(Html(base_layout("Sessions", content).into_string()))
+    use maud::html;
+    let sessions = state.db.get_sessions_with_counts(100, 0).await?;
+    let sidebar = sidebar_session_list(&sessions, None);
+    let content = html! {
+        div class="welcome-message" {
+            h2 { "Welcome to Traceview" }
+            p { "Select a session from the sidebar to view traces." }
+            p { "Sessions will appear here as traces are received via OTLP." }
+        }
+    };
+    Ok(Html(app_layout("Sessions", sidebar, content, false, None).into_string()))
 }
 
-/// HTML session detail view.
+/// HTML session detail view with sidebar.
 async fn session_view(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -274,9 +282,11 @@ async fn session_view(
         reason: format!("session not found: {id}"),
     })?;
     let spans = state.db.get_spans_by_session(&id).await?;
+    let sessions = state.db.get_sessions_with_counts(100, 0).await?;
+    let sidebar = sidebar_session_list(&sessions, Some(&id));
     let content = session_detail(&session, &spans);
     let title = session.name.as_deref().unwrap_or(&session.id);
-    Ok(Html(base_layout(title, content).into_string()))
+    Ok(Html(app_layout(title, sidebar, content, true, Some(&id)).into_string()))
 }
 
 // ============================================================================
