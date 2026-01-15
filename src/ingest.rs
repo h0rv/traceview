@@ -860,6 +860,36 @@ fn build_metadata(attrs: &HashMap<String, serde_json::Value>) -> Option<serde_js
 }
 
 // ============================================================================
+// Session Name Extraction
+// ============================================================================
+
+/// Extract a session name from the first user message in a list of spans.
+///
+/// Looks for the first span with `SpanKind::User` and extracts its content
+/// to use as the session name. The name is trimmed and truncated to 50 characters
+/// with "..." appended if longer.
+///
+/// Returns `None` if:
+/// - No span with `SpanKind::User` is found
+/// - The user span has no content
+/// - The content is empty after trimming
+pub fn extract_session_name(spans: &[Span]) -> Option<String> {
+    spans
+        .iter()
+        .find(|s| s.kind == SpanKind::User)
+        .and_then(|s| s.content.as_ref())
+        .map(|c| {
+            let trimmed = c.trim();
+            if trimmed.chars().count() > 50 {
+                format!("{}...", trimmed.chars().take(47).collect::<String>())
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .filter(|s| !s.is_empty())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1569,6 +1599,158 @@ mod tests {
             assert!(result.is_ok());
             let value = result.unwrap_or_default();
             assert_eq!(value, "00f067aa0ba902b7");
+        }
+    }
+
+    mod extract_session_name_tests {
+        use super::*;
+
+        fn create_test_span(kind: SpanKind, content: Option<&str>) -> Span {
+            Span {
+                id: "span-1".to_string(),
+                session_id: "session-1".to_string(),
+                parent_span_id: None,
+                trace_id: "trace-1".to_string(),
+                kind,
+                model: None,
+                content: content.map(|s| s.to_string()),
+                metadata: None,
+                start_time: 1000,
+                end_time: None,
+                duration_ms: None,
+                input_tokens: None,
+                output_tokens: None,
+                finish_reason: None,
+                tool_call_id: None,
+                tool_name: None,
+            }
+        }
+
+        #[test]
+        fn test_extract_session_name_from_user_message() {
+            let spans = vec![
+                create_test_span(SpanKind::System, Some("You are a helpful assistant.")),
+                create_test_span(SpanKind::User, Some("Hello, how are you?")),
+                create_test_span(SpanKind::Assistant, Some("I'm doing well!")),
+            ];
+
+            let name = extract_session_name(&spans);
+            assert_eq!(name, Some("Hello, how are you?".to_string()));
+        }
+
+        #[test]
+        fn test_extract_session_name_truncation() {
+            let long_message =
+                "This is a very long user message that exceeds the fifty character limit we set";
+            let spans = vec![create_test_span(SpanKind::User, Some(long_message))];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_some());
+            let name = name.unwrap_or_default();
+            // Should be 47 chars + "..."
+            assert_eq!(name.chars().count(), 50);
+            assert!(name.ends_with("..."));
+            assert!(name.starts_with("This is a very long user message that exceeds t"));
+        }
+
+        #[test]
+        fn test_extract_session_name_no_user_message() {
+            let spans = vec![
+                create_test_span(SpanKind::System, Some("You are a helpful assistant.")),
+                create_test_span(SpanKind::Assistant, Some("I'm ready to help!")),
+            ];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_none());
+        }
+
+        #[test]
+        fn test_extract_session_name_empty_content() {
+            let spans = vec![create_test_span(SpanKind::User, Some(""))];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_none());
+        }
+
+        #[test]
+        fn test_extract_session_name_whitespace_only() {
+            let spans = vec![create_test_span(SpanKind::User, Some("   \n\t  "))];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_none());
+        }
+
+        #[test]
+        fn test_extract_session_name_none_content() {
+            let spans = vec![create_test_span(SpanKind::User, None)];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_none());
+        }
+
+        #[test]
+        fn test_extract_session_name_trims_whitespace() {
+            let spans = vec![create_test_span(SpanKind::User, Some("  Hello world  \n"))];
+
+            let name = extract_session_name(&spans);
+            assert_eq!(name, Some("Hello world".to_string()));
+        }
+
+        #[test]
+        fn test_extract_session_name_first_user_message() {
+            let spans = vec![
+                create_test_span(SpanKind::User, Some("First message")),
+                create_test_span(SpanKind::User, Some("Second message")),
+            ];
+
+            let name = extract_session_name(&spans);
+            assert_eq!(name, Some("First message".to_string()));
+        }
+
+        #[test]
+        fn test_extract_session_name_unicode_truncation() {
+            // Test that truncation handles unicode correctly (using chars not bytes)
+            let unicode_message = "Hello, \u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}!";
+            let spans = vec![create_test_span(SpanKind::User, Some(unicode_message))];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_some());
+            let name = name.unwrap_or_default();
+            // Should be exactly 50 chars
+            assert_eq!(name.chars().count(), 50);
+            assert!(name.ends_with("..."));
+        }
+
+        #[test]
+        fn test_extract_session_name_exactly_50_chars() {
+            // Exactly 50 characters - should not be truncated
+            let exact_50 = "12345678901234567890123456789012345678901234567890";
+            assert_eq!(exact_50.chars().count(), 50);
+            let spans = vec![create_test_span(SpanKind::User, Some(exact_50))];
+
+            let name = extract_session_name(&spans);
+            assert_eq!(name, Some(exact_50.to_string()));
+        }
+
+        #[test]
+        fn test_extract_session_name_51_chars_truncated() {
+            // 51 characters - should be truncated
+            let char_51 = "123456789012345678901234567890123456789012345678901";
+            assert_eq!(char_51.chars().count(), 51);
+            let spans = vec![create_test_span(SpanKind::User, Some(char_51))];
+
+            let name = extract_session_name(&spans);
+            assert!(name.is_some());
+            let name = name.unwrap_or_default();
+            assert_eq!(name.chars().count(), 50);
+            assert!(name.ends_with("..."));
+        }
+
+        #[test]
+        fn test_extract_session_name_empty_spans() {
+            let spans: Vec<Span> = vec![];
+            let name = extract_session_name(&spans);
+            assert!(name.is_none());
         }
     }
 }

@@ -26,7 +26,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
 use crate::error::TraceviewError;
-use crate::ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto};
+use crate::ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto, extract_session_name};
 use crate::models::{Session, Span};
 use crate::views::{base_layout, session_detail, sessions_list, span_html};
 
@@ -158,14 +158,21 @@ async fn ingest_traces(
         .unwrap_or(0);
 
     // Upsert sessions for all unique session_ids
-    for session_id in session_ids {
+    for session_id in &session_ids {
         let session =
-            Session { id: session_id.to_string(), name: None, created_at: now, updated_at: now };
+            Session { id: (*session_id).to_string(), name: None, created_at: now, updated_at: now };
         state.db.upsert_session(&session).await?;
     }
 
     // Insert all spans
     state.db.insert_spans(&spans).await?;
+
+    // Auto-name sessions from first user message
+    if let Some(name) = extract_session_name(&spans) {
+        for session_id in &session_ids {
+            state.db.update_session_name_if_empty(session_id, &name).await?;
+        }
+    }
 
     Ok(StatusCode::OK)
 }

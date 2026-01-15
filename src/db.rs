@@ -308,6 +308,19 @@ impl Database {
         Ok(spans)
     }
 
+    /// Update a session's name only if it is currently NULL.
+    ///
+    /// This is used for auto-naming sessions from the first user message.
+    /// If the session already has a name, this operation does nothing.
+    pub async fn update_session_name_if_empty(&self, session_id: &str, name: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET name = ? WHERE id = ? AND name IS NULL")
+            .bind(name)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Create or update a session.
     pub async fn upsert_session(&self, session: &Session) -> Result<()> {
         sqlx::query(
@@ -965,5 +978,78 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans.first().and_then(|s| s.content.as_deref()), Some("Updated content"));
         assert_eq!(spans.first().and_then(|s| s.end_time), Some(2000));
+    }
+
+    #[tokio::test]
+    async fn test_update_session_name_if_empty() {
+        let db = Database::new_in_memory().await.unwrap_or_else(|e| {
+            panic!("Failed to create in-memory database: {e}");
+        });
+
+        // Create a session with no name
+        let session = Session {
+            id: "session-auto-name".to_string(),
+            name: None,
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+        };
+        db.upsert_session(&session).await.unwrap_or_else(|e| {
+            panic!("Failed to upsert session: {e}");
+        });
+
+        // Update the name
+        db.update_session_name_if_empty("session-auto-name", "Auto-generated name")
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Failed to update session name: {e}");
+            });
+
+        // Verify the name was set
+        let retrieved = db.get_session("session-auto-name").await.unwrap_or(None);
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap_or_else(|| create_test_session(""));
+        assert_eq!(retrieved.name, Some("Auto-generated name".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_session_name_preserves_existing() {
+        let db = Database::new_in_memory().await.unwrap_or_else(|e| {
+            panic!("Failed to create in-memory database: {e}");
+        });
+
+        // Create a session with an existing name
+        let session = Session {
+            id: "session-existing-name".to_string(),
+            name: Some("Existing Name".to_string()),
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+        };
+        db.upsert_session(&session).await.unwrap_or_else(|e| {
+            panic!("Failed to upsert session: {e}");
+        });
+
+        // Try to update the name - should NOT change since name is already set
+        db.update_session_name_if_empty("session-existing-name", "New auto name")
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Failed to update session name: {e}");
+            });
+
+        // Verify the original name is preserved
+        let retrieved = db.get_session("session-existing-name").await.unwrap_or(None);
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap_or_else(|| create_test_session(""));
+        assert_eq!(retrieved.name, Some("Existing Name".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_session_name_nonexistent_session() {
+        let db = Database::new_in_memory().await.unwrap_or_else(|e| {
+            panic!("Failed to create in-memory database: {e}");
+        });
+
+        // Should not error when updating a nonexistent session
+        let result = db.update_session_name_if_empty("nonexistent-session", "Some name").await;
+        assert!(result.is_ok());
     }
 }
