@@ -27,7 +27,7 @@ use crate::db::Database;
 use crate::error::TraceviewError;
 use crate::ingest::{OtlpTraceData, convert_otlp};
 use crate::models::{Session, Span};
-use crate::views::{base_layout, session_detail, sessions_list};
+use crate::views::{base_layout, session_detail, sessions_list, span_html};
 
 // ============================================================================
 // App State
@@ -180,6 +180,20 @@ async fn get_session_spans(
     Ok(Json(spans))
 }
 
+/// SSE data format - includes both span data and pre-rendered HTML.
+#[derive(serde::Serialize)]
+struct SseSpanData {
+    id: String,
+    session_id: String,
+    html: String,
+}
+
+fn span_to_sse_data(span: &Span) -> Option<String> {
+    let html = span_html(span).into_string();
+    let data = SseSpanData { id: span.id.clone(), session_id: span.session_id.clone(), html };
+    serde_json::to_string(&data).ok()
+}
+
 /// SSE stream for all span updates.
 async fn stream_all(
     State(state): State<SharedState>,
@@ -187,9 +201,7 @@ async fn stream_all(
     let rx = state.db.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
         result.ok().and_then(|span| {
-            serde_json::to_string(&span)
-                .ok()
-                .map(|data| Ok(Event::default().event("span").data(data)))
+            span_to_sse_data(&span).map(|data| Ok(Event::default().event("span").data(data)))
         })
     });
 
@@ -206,9 +218,7 @@ async fn stream_session(
         let session_id = id.clone();
         result.ok().and_then(|span| {
             if span.session_id == session_id {
-                serde_json::to_string(&span)
-                    .ok()
-                    .map(|data| Ok(Event::default().event("span").data(data)))
+                span_to_sse_data(&span).map(|data| Ok(Event::default().event("span").data(data)))
             } else {
                 None
             }

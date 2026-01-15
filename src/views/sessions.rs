@@ -11,13 +11,13 @@ use crate::models::Session;
 /// * `sessions` - Slice of sessions to render
 pub fn sessions_list(sessions: &[Session]) -> Markup {
     html! {
-        @if sessions.is_empty() {
-            div class="empty-state" {
-                p { "No sessions found." }
-                p { "Sessions will appear here when traces are received." }
-            }
-        } @else {
-            ul class="session-list" {
+        ul id="session-list" class="session-list" {
+            @if sessions.is_empty() {
+                div class="empty-state" {
+                    p { "No sessions found." }
+                    p { "Sessions will appear here when traces are received." }
+                }
+            } @else {
                 @for session in sessions {
                     (session_item(session))
                 }

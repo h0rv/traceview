@@ -39,3 +39,13 @@ main { max-width: 1200px; margin: 0 auto; }
 
 /* Spans container for SSE updates */
 #spans-container { min-height: 100px; }
+
+/* New session animation */
+.session-item-new {
+    animation: highlight-new 2s ease-out;
+}
+
+@keyframes highlight-new {
+    0% { background-color: #c8e6c9; transform: scale(1.02); }
+    100% { background-color: white; transform: scale(1); }
+}

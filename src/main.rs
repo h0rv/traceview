@@ -19,13 +19,14 @@ use thiserror as _;
 use tokio_stream as _;
 use tower_http as _;
 
-// Dev-dependencies
+// Dev-dependencies (only available in test builds)
 #[cfg(test)]
-use reqwest as _;
-#[cfg(test)]
-use tempfile as _;
-#[cfg(test)]
-use tower as _;
+mod _dev_deps {
+    use futures_util as _;
+    use reqwest as _;
+    use tempfile as _;
+    use tower as _;
+}
 
 use std::net::SocketAddr;
 use std::sync::Arc;

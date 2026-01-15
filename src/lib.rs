@@ -19,13 +19,14 @@ use tokio_stream as _;
 use tower_http as _;
 use tracing_subscriber as _;
 
-// Dev-dependencies used only in tests
+// Dev-dependencies - silence lint via cfg(test) since they're only available in tests
 #[cfg(test)]
-use reqwest as _;
-#[cfg(test)]
-use tempfile as _;
-#[cfg(test)]
-use tower as _;
+mod _dev_deps {
+    use futures_util as _;
+    use reqwest as _;
+    use tempfile as _;
+    use tower as _;
+}
 
 pub mod api;
 pub mod db;

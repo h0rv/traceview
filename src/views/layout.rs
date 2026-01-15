@@ -33,39 +33,117 @@ pub fn base_layout(title: &str, content: Markup) -> Markup {
 fn sse_script() -> &'static str {
     r#"
 (function() {
-    const container = document.getElementById('spans-container');
-    if (!container) return;
+    // Session detail page - stream spans for this session
+    const spansContainer = document.getElementById('spans-container');
+    if (spansContainer) {
+        const sessionId = spansContainer.dataset.sessionId;
+        if (sessionId) {
+            console.log('Connecting to SSE for session:', sessionId);
+            const eventSource = new EventSource('/sessions/' + sessionId + '/stream');
 
-    const sessionId = container.dataset.sessionId;
-    if (!sessionId) return;
+            eventSource.addEventListener('span', function(event) {
+                console.log('SSE span received:', event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.html) {
+                        // Remove empty state if present
+                        const emptyState = spansContainer.querySelector('.empty-state');
+                        if (emptyState) {
+                            emptyState.remove();
+                        }
 
-    const eventSource = new EventSource('/api/sessions/' + sessionId + '/stream');
+                        const temp = document.createElement('div');
+                        temp.innerHTML = data.html;
+                        const newSpan = temp.firstChild;
+                        if (newSpan) {
+                            const existingSpan = document.querySelector('[data-span-id="' + data.id + '"]');
+                            if (existingSpan) {
+                                existingSpan.replaceWith(newSpan);
+                            } else {
+                                spansContainer.appendChild(newSpan);
+                                newSpan.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing SSE data:', e);
+                }
+            });
 
-    eventSource.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        if (data.html) {
-            const temp = document.createElement('div');
-            temp.innerHTML = data.html;
-            const newSpan = temp.firstChild;
-            if (newSpan) {
-                const existingSpan = document.querySelector('[data-span-id="' + data.id + '"]');
-                if (existingSpan) {
-                    existingSpan.replaceWith(newSpan);
-                } else {
-                    container.appendChild(newSpan);
+            eventSource.onopen = function() {
+                console.log('SSE connection established for session:', sessionId);
+            };
+
+            eventSource.onerror = function(event) {
+                console.error('SSE error, will auto-reconnect:', event);
+            };
+
+            window.addEventListener('beforeunload', function() {
+                eventSource.close();
+            });
+        }
+    }
+
+    // Session list page - stream all spans to update session list
+    const sessionList = document.getElementById('session-list');
+    if (sessionList) {
+        console.log('Connecting to SSE firehose for session list');
+        const eventSource = new EventSource('/stream');
+
+        // Track sessions we've seen to add new ones
+        const knownSessions = new Set();
+        sessionList.querySelectorAll('.session-item').forEach(function(item) {
+            const link = item.querySelector('a');
+            if (link) {
+                const href = link.getAttribute('href');
+                if (href) {
+                    const match = href.match(/\/sessions\/(.+)$/);
+                    if (match) knownSessions.add(match[1]);
                 }
             }
-        }
-    };
+        });
 
-    eventSource.onerror = function(event) {
-        console.error('SSE connection error:', event);
-        eventSource.close();
-    };
+        eventSource.addEventListener('span', function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.session_id && !knownSessions.has(data.session_id)) {
+                    console.log('New session detected:', data.session_id);
+                    knownSessions.add(data.session_id);
 
-    window.addEventListener('beforeunload', function() {
-        eventSource.close();
-    });
+                    // Remove empty state if present
+                    const emptyState = sessionList.querySelector('.empty-state');
+                    if (emptyState) {
+                        emptyState.remove();
+                    }
+
+                    // Add new session to the list
+                    const newItem = document.createElement('li');
+                    newItem.className = 'session-item session-item-new';
+                    newItem.innerHTML = '<a href="/sessions/' + data.session_id + '">' + data.session_id + '</a><span class="session-meta">Just now</span>';
+                    sessionList.insertBefore(newItem, sessionList.firstChild);
+
+                    // Flash animation
+                    setTimeout(function() {
+                        newItem.classList.remove('session-item-new');
+                    }, 2000);
+                }
+            } catch (e) {
+                console.error('Error parsing SSE data:', e);
+            }
+        });
+
+        eventSource.onopen = function() {
+            console.log('SSE firehose connected for session list');
+        };
+
+        eventSource.onerror = function(event) {
+            console.error('SSE firehose error:', event);
+        };
+
+        window.addEventListener('beforeunload', function() {
+            eventSource.close();
+        });
+    }
 })();
 "#
 }
