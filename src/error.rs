@@ -13,6 +13,10 @@ pub enum TraceviewError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Protobuf decode failed.
+    #[error("protobuf error: {0}")]
+    Protobuf(#[from] prost::DecodeError),
+
     /// Invalid span data encountered.
     #[error("invalid span: {reason}")]
     InvalidSpan { reason: String },
@@ -94,6 +98,7 @@ mod tests {
                 }
                 TraceviewError::ChannelSend => {}
                 TraceviewError::Io(_) => panic!("unexpected Io variant"),
+                TraceviewError::Protobuf(_) => panic!("unexpected Protobuf variant"),
             }
         }
     }

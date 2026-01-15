@@ -68,10 +68,14 @@ def make_event(name: str, timestamp: str, attrs: list[dict]) -> dict:
     }
 
 
-def generate_conversation() -> dict:
-    """Generate a fake GenAI conversation trace."""
+def generate_conversation(fixed_session_id: str | None = None) -> dict:
+    """Generate a fake GenAI conversation trace.
+
+    Args:
+        fixed_session_id: If provided, use this session ID instead of generating a new one
+    """
     trace_id = generate_trace_id()
-    session_id = f"session-{uuid.uuid4().hex[:8]}"
+    session_id = fixed_session_id or f"session-{uuid.uuid4().hex[:8]}"
 
     # Conversation scenarios
     scenarios = [
@@ -229,12 +233,172 @@ def generate_conversation() -> dict:
     }
 
 
-def send_traces(count: int = 3) -> None:
-    """Send multiple conversation traces to traceview."""
-    print(f"🚀 Sending {count} conversation traces to {TRACEVIEW_URL}...")
+def send_single_event(session_id: str, event_type: str, content: str, **kwargs) -> None:
+    """Send a single event/span to simulate streaming LLM output."""
+    trace_id = generate_trace_id()
+    span_id = generate_span_id()
+    now_ns = ns_timestamp(0)
+
+    # Map event type to OTEL event name
+    event_name_map = {
+        "user": "gen_ai.user.message",
+        "assistant": "gen_ai.assistant.message",
+        "thinking": "gen_ai.thinking",
+        "tool_call": "gen_ai.tool.message",
+        "tool_result": "gen_ai.tool.message",
+        "system": "gen_ai.system.message",
+    }
+
+    event_name = event_name_map.get(event_type, "gen_ai.assistant.message")
+
+    # Build event attributes
+    event_attrs = [make_attr("gen_ai.content", content)]
+    if event_type == "tool_call":
+        event_attrs.append(make_attr("tool_calls", "true"))
+        if "tool_name" in kwargs:
+            event_attrs.append(make_attr("gen_ai.tool.name", kwargs["tool_name"]))
+            event_attrs.append(make_attr("gen_ai.tool.call.id", f"call_{uuid.uuid4().hex[:8]}"))
+    elif event_type == "tool_result" and "tool_name" in kwargs:
+        event_attrs.append(make_attr("gen_ai.tool.name", kwargs["tool_name"]))
+
+    # Build the trace
+    trace_data = {
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [make_attr("session.id", session_id)]
+            },
+            "scopeSpans": [{
+                "scope": {"name": "demo"},
+                "spans": [{
+                    "traceId": trace_id,
+                    "spanId": span_id,
+                    "name": event_type,
+                    "startTimeUnixNano": now_ns,
+                    "endTimeUnixNano": ns_timestamp(100),
+                    "attributes": [
+                        make_attr("gen_ai.system", "anthropic"),
+                        make_attr("gen_ai.request.model", kwargs.get("model", "claude-sonnet-4-20250514")),
+                    ],
+                    "events": [{
+                        "name": event_name,
+                        "timeUnixNano": now_ns,
+                        "attributes": event_attrs,
+                    }]
+                }]
+            }]
+        }]
+    }
+
+    httpx.post(TRACEVIEW_URL, json=trace_data, headers={"Content-Type": "application/json"}, timeout=10)
+
+
+def simulate_conversation(session_id: str) -> None:
+    """Simulate a realistic LLM conversation with streaming delays."""
+    print(f"\n💬 Simulating conversation in session: {session_id}")
+
+    # Pick a random scenario
+    scenarios = [
+        {
+            "user": "What's the weather like in San Francisco today?",
+            "thinking": "The user wants current weather information for San Francisco. I should use the weather tool to get accurate, up-to-date information rather than relying on my training data.",
+            "tool_name": "get_weather",
+            "tool_input": '{"city": "San Francisco", "units": "fahrenheit"}',
+            "tool_output": "Current conditions in San Francisco: 64°F, partly cloudy, humidity 72%, wind 12 mph W",
+            "assistant": "The weather in San Francisco today is quite pleasant! It's currently 64°F (18°C) with partly cloudy skies. The humidity is at 72% and there's a light westerly wind at 12 mph. Perfect weather for a walk along the Embarcadero!",
+        },
+        {
+            "user": "Calculate a 20% tip on a $127.50 dinner bill, and also show me 15% and 25%",
+            "thinking": "The user wants tip calculations at multiple percentages. I'll calculate all three to give them options. This is straightforward math: multiply the bill by each percentage.",
+            "tool_name": "calculator",
+            "tool_input": '{"expression": "127.50 * 0.20"}',
+            "tool_output": "25.50",
+            "assistant": "Here are the tip calculations for your $127.50 bill:\n\n• **15% tip:** $19.13 → Total: $146.63\n• **20% tip:** $25.50 → Total: $153.00\n• **25% tip:** $31.88 → Total: $159.38\n\nThe 20% tip of $25.50 bringing your total to $153.00 is a nice round number!",
+        },
+        {
+            "user": "Explain how transformers work in machine learning",
+            "thinking": "This is a technical explanation request about transformer architecture. I should explain the key concepts: attention mechanism, self-attention, positional encoding, and how they enable parallel processing. I'll keep it accessible while being accurate.",
+            "tool_name": None,
+            "assistant": "Transformers are a neural network architecture that revolutionized NLP. Here's how they work:\n\n**Self-Attention**: The key innovation. Each word looks at every other word in the sequence to understand context. \"The cat sat on the mat\" - 'sat' attends to 'cat' to know who's sitting.\n\n**Positional Encoding**: Since transformers process all words in parallel (unlike RNNs), they add position information so the model knows word order.\n\n**Multi-Head Attention**: Multiple attention patterns run in parallel, letting the model focus on different types of relationships simultaneously.\n\n**Feed-Forward Layers**: After attention, each position goes through the same neural network independently.\n\nThe magic is parallelization - transformers can process entire sequences at once, making them much faster to train than sequential models.",
+        },
+    ]
+
+    scenario = random.choice(scenarios)
+
+    # User message
+    print(f"  👤 User: {scenario['user'][:60]}...")
+    send_single_event(session_id, "user", scenario["user"])
+    time.sleep(random.uniform(0.3, 0.6))
+
+    # Thinking (simulated delay for "reasoning")
+    print(f"  🧠 Thinking...")
+    send_single_event(session_id, "thinking", scenario["thinking"])
+    time.sleep(random.uniform(0.8, 1.5))
+
+    # Tool call if applicable
+    if scenario.get("tool_name"):
+        print(f"  🔧 Tool call: {scenario['tool_name']}")
+        send_single_event(
+            session_id, "tool_call",
+            scenario["tool_input"],
+            tool_name=scenario["tool_name"]
+        )
+        time.sleep(random.uniform(0.4, 0.8))
+
+        # Tool result
+        print(f"  📥 Tool result received")
+        send_single_event(
+            session_id, "tool_result",
+            scenario["tool_output"],
+            tool_name=scenario["tool_name"]
+        )
+        time.sleep(random.uniform(0.2, 0.4))
+
+    # Assistant response (simulate token streaming with chunks)
+    print(f"  🤖 Assistant responding...")
+    response = scenario["assistant"]
+
+    # Split response into chunks to simulate streaming
+    chunk_size = random.randint(50, 100)
+    chunks = [response[i:i+chunk_size] for i in range(0, len(response), chunk_size)]
+
+    for j, _chunk in enumerate(chunks):
+        # Send partial response
+        partial = response[:((j + 1) * chunk_size)]
+        send_single_event(session_id, "assistant", partial)
+        time.sleep(random.uniform(0.1, 0.3))  # Token generation delay
+
+    print(f"  ✅ Response complete ({len(response)} chars)")
+
+
+def send_traces(count: int = 3, fixed_session_id: str | None = None, streaming: bool = True) -> None:
+    """Send multiple conversation traces to traceview.
+
+    Args:
+        count: Number of traces/conversations to send
+        fixed_session_id: If provided, all traces go to this session (for testing live updates)
+        streaming: If True, simulate realistic LLM timing with delays
+    """
+    if streaming and fixed_session_id:
+        # Use the new streaming simulation
+        print(f"🎬 Simulating {count} streaming conversation(s)...")
+        for i in range(count):
+            print(f"\n{'='*50}")
+            print(f"Conversation {i+1}/{count}")
+            print('='*50)
+            simulate_conversation(fixed_session_id)
+            if i < count - 1:
+                time.sleep(1.0)  # Pause between conversations
+        print(f"\n✅ Done! View at http://localhost:6969/sessions/{fixed_session_id}")
+        return
+
+    # Original batch mode
+    if fixed_session_id:
+        print(f"🚀 Sending {count} traces to session '{fixed_session_id}'...")
+    else:
+        print(f"🚀 Sending {count} conversation traces to {TRACEVIEW_URL}...")
 
     for i in range(count):
-        trace_data = generate_conversation()
+        trace_data = generate_conversation(fixed_session_id)
 
         try:
             response = httpx.post(
@@ -283,17 +447,68 @@ def send_traces(count: int = 3) -> None:
 def main() -> None:
     """Main entry point."""
     count = 3
+    session_id = None
+    streaming = False
+    new_session = False
 
-    # Parse --count argument
-    if "--count" in sys.argv:
-        try:
-            idx = sys.argv.index("--count")
-            count = int(sys.argv[idx + 1])
-        except (IndexError, ValueError):
-            print("Usage: send_traces.py [--count N]")
-            sys.exit(1)
+    # Parse arguments
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--count" and i + 1 < len(args):
+            try:
+                count = int(args[i + 1])
+            except ValueError:
+                print("Usage: send_traces.py [--count N] [--session ID] [--stream] [--new]")
+                sys.exit(1)
+            i += 2
+        elif args[i] == "--session" and i + 1 < len(args):
+            session_id = args[i + 1]
+            i += 2
+        elif args[i] == "--stream":
+            streaming = True
+            i += 1
+        elif args[i] == "--new":
+            new_session = True
+            i += 1
+        elif args[i] in ("-h", "--help"):
+            print("""
+send_traces.py - Send demo traces to traceview
 
-    send_traces(count)
+Usage:
+    uv run scripts/send_traces.py [options]
+
+Options:
+    --count N      Number of conversations to send (default: 3)
+    --session ID   Send to a specific session ID
+    --stream       Simulate realistic LLM timing with delays
+    --new          Create a new session and stream to it (combines --stream with new session)
+    -h, --help     Show this help
+
+Examples:
+    # Send 3 quick batch traces (new sessions each)
+    uv run scripts/send_traces.py
+
+    # Create a new session and stream a realistic conversation
+    uv run scripts/send_traces.py --new
+
+    # Stream multiple conversations to a new session
+    uv run scripts/send_traces.py --new --count 3
+
+    # Stream to an existing session
+    uv run scripts/send_traces.py --session session-abc123 --stream --count 2
+""")
+            sys.exit(0)
+        else:
+            i += 1
+
+    # --new creates a new session and enables streaming
+    if new_session:
+        session_id = f"session-{uuid.uuid4().hex[:8]}"
+        streaming = True
+        print(f"📝 Created new session: {session_id}")
+
+    send_traces(count, session_id, streaming)
 
 
 if __name__ == "__main__":

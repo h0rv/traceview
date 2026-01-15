@@ -11,8 +11,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,7 +26,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
 use crate::error::TraceviewError;
-use crate::ingest::{OtlpTraceData, convert_otlp};
+use crate::ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto};
 use crate::models::{Session, Span};
 use crate::views::{base_layout, session_detail, sessions_list, span_html};
 
@@ -56,6 +57,7 @@ impl IntoResponse for ApiError {
             TraceviewError::InvalidSpan { .. } => StatusCode::BAD_REQUEST,
             TraceviewError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TraceviewError::Json(_) => StatusCode::BAD_REQUEST,
+            TraceviewError::Protobuf(_) => StatusCode::BAD_REQUEST,
             TraceviewError::ChannelSend => StatusCode::INTERNAL_SERVER_ERROR,
             TraceviewError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -67,6 +69,13 @@ impl<E: Into<TraceviewError>> From<E> for ApiError {
     fn from(err: E) -> Self {
         ApiError(err.into())
     }
+}
+
+/// Check if a content type indicates protobuf.
+fn is_protobuf_content_type(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|ct| {
+        ct.contains("application/x-protobuf") || ct.contains("application/protobuf")
+    })
 }
 
 // ============================================================================
@@ -110,16 +119,30 @@ pub struct ListParams {
 // Handlers
 // ============================================================================
 
-/// Ingest OTLP traces in JSON format.
+/// Ingest OTLP traces in JSON or Protobuf format.
 ///
 /// Accepts OTLP trace data, converts it to spans, and stores them in the database.
 /// Sessions are automatically created/updated for all spans.
+///
+/// Supported content types:
+/// - `application/json`: OTLP JSON format
+/// - `application/x-protobuf` or `application/protobuf`: OTLP Protobuf format
 async fn ingest_traces(
     State(state): State<SharedState>,
-    Json(data): Json<OtlpTraceData>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    // Convert OTLP data to spans
-    let spans = convert_otlp(&data)?;
+    // Get content type from headers
+    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
+
+    // Parse based on content type
+    let spans = if is_protobuf_content_type(content_type) {
+        convert_otlp_proto(&body)?
+    } else {
+        // Default to JSON
+        let data: OtlpTraceData = serde_json::from_slice(&body)?;
+        convert_otlp(&data)?
+    };
 
     if spans.is_empty() {
         return Ok(StatusCode::OK);
@@ -783,5 +806,96 @@ mod tests {
         let err = ApiError(TraceviewError::ChannelSend);
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Test Protobuf maps to BAD_REQUEST
+        let err = ApiError(TraceviewError::Protobuf(prost::DecodeError::new("test")));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_traces_protobuf_content_type() {
+        let state = setup_test_state().await;
+        let app = create_router(Arc::clone(&state));
+
+        // Create a valid protobuf payload using prost
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span as ProtoSpan};
+        use prost::Message;
+
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "session.id".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(
+                                "proto-test-session".to_string(),
+                            )),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![ProtoSpan {
+                        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        span_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                        parent_span_id: vec![],
+                        name: "test_proto_span".to_string(),
+                        start_time_unix_nano: 1700000000000000000,
+                        end_time_unix_nano: 1700000001000000000,
+                        attributes: vec![],
+                        events: vec![],
+                        links: vec![],
+                        status: None,
+                        kind: 0,
+                        flags: 0,
+                        trace_state: String::new(),
+                        dropped_attributes_count: 0,
+                        dropped_events_count: 0,
+                        dropped_links_count: 0,
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let mut buf = Vec::new();
+        request.encode(&mut buf).unwrap_or_else(|e| panic!("Failed to encode protobuf: {e}"));
+
+        let http_request = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/x-protobuf")
+            .body(Body::from(buf))
+            .unwrap_or_else(|e| panic!("Failed to build request: {e}"));
+
+        let response = app.oneshot(http_request).await.unwrap_or_else(|e| {
+            panic!("Request failed: {e}");
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify span was inserted
+        let spans = state.db.get_spans_by_session("proto-test-session").await.unwrap_or_default();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans.first().map(|s| s.trace_id.as_str()),
+            Some("0102030405060708090a0b0c0d0e0f10")
+        );
+    }
+
+    #[test]
+    fn test_is_protobuf_content_type() {
+        assert!(is_protobuf_content_type(Some("application/x-protobuf")));
+        assert!(is_protobuf_content_type(Some("application/protobuf")));
+        assert!(is_protobuf_content_type(Some("application/x-protobuf; charset=utf-8")));
+        assert!(!is_protobuf_content_type(Some("application/json")));
+        assert!(!is_protobuf_content_type(Some("text/plain")));
+        assert!(!is_protobuf_content_type(None));
     }
 }
