@@ -1,2 +1,4 @@
 /target
 traces.db*
+traceview.db
+.playwright-mcp

@@ -1,15 +1,18 @@
-//! CLI entry point for traceview.
+//! tv - Unified CLI for traceview.
 //!
-//! This binary provides the main server executable that:
-//! - Accepts OTLP trace data via HTTP
-//! - Stores spans in SQLite
-//! - Provides JSON API and SSE streams for viewing traces
+//! A single binary that can:
+//! - Start the OTLP server with web UI (`tv serve`)
+//! - Run the TUI viewer (`tv ui`)
+//! - Run both together (default: `tv`)
 
 // Silence false positives from `unused_crate_dependencies` lint.
 // These crates are used in the library but lint checks binary separately.
+use axum as _;
 use base64 as _;
 use chrono as _;
+use futures as _;
 use futures_core as _;
+use iocraft as _;
 use maud as _;
 use opentelemetry_proto as _;
 use pin_project_lite as _;
@@ -30,26 +33,23 @@ mod _dev_deps {
     use tower as _;
 }
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use clap::Parser;
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
 
-use traceview::{AppState, BatchWriter, Database, create_router};
+use traceview::{Database, run_server, run_tui};
 
-/// Command line arguments for traceview server.
+/// tv - Traceview OTLP trace viewer
 #[derive(Parser)]
-#[command(name = "traceview", about = "OTLP trace viewer for GenAI applications")]
-struct Args {
-    /// Database file path
-    #[arg(short, long, default_value = "./traces.db")]
-    db_path: PathBuf,
-
-    /// Port to listen on
-    #[arg(short, long, default_value_t = 6969)]
+#[command(name = "tv", about = "Traceview - OTLP trace viewer for GenAI applications", version)]
+struct Cli {
+    /// HTTP port for OTLP ingest and web UI
+    #[arg(short, long, default_value_t = 4318, env = "TV_PORT")]
     port: u16,
+
+    /// Path to SQLite database
+    #[arg(short, long, default_value = "traces.db", env = "TV_DB_PATH")]
+    db: String,
 
     /// Batch size for span inserts
     #[arg(long, default_value_t = 1000)]
@@ -58,10 +58,21 @@ struct Args {
     /// Batch interval in milliseconds
     #[arg(long, default_value_t = 100)]
     batch_interval_ms: u64,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start OTLP server and web UI only (no TUI)
+    Serve,
+    /// Start TUI viewer only (no server)
+    Ui,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> traceview::Result<()> {
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -70,39 +81,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // Parse args
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    // Convert db_path to string, with fallback
-    let db_path_str = args.db_path.to_str().unwrap_or("./traces.db");
+    // Open/create database
+    let db = Database::new(&cli.db).await?;
 
-    // Create database
-    let db = Database::new(db_path_str).await?;
-
-    // Create batch writer (spawn as background task)
-    let (batch_writer, _span_tx) = BatchWriter::new(
-        db.clone(),
-        args.batch_size,
-        Duration::from_millis(args.batch_interval_ms),
-    );
-    tokio::spawn(async move {
-        if let Err(e) = batch_writer.run().await {
-            tracing::error!("Batch writer error: {}", e);
+    match cli.command {
+        Some(Command::Serve) => {
+            // Server only mode
+            println!("Server running at http://localhost:{}", cli.port);
+            run_server(db, cli.port, cli.batch_size, cli.batch_interval_ms).await
         }
-    });
+        Some(Command::Ui) => {
+            // TUI only mode
+            run_tui(Arc::new(db)).await
+        }
+        None => {
+            // Default: Both together
+            println!("Server running at http://localhost:{}", cli.port);
 
-    // Create app state
-    let state = Arc::new(AppState { db });
+            let server_db = db.clone();
+            let port = cli.port;
+            let batch_size = cli.batch_size;
+            let batch_interval = cli.batch_interval_ms;
 
-    // Create router
-    let app = create_router(state);
+            // Spawn server in background
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = run_server(server_db, port, batch_size, batch_interval).await {
+                    tracing::error!("Server error: {}", e);
+                }
+            });
 
-    // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    tracing::info!("Starting traceview on http://{}", addr);
+            // Run TUI in foreground (blocks until quit)
+            let result = run_tui(Arc::new(db)).await;
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
+            // TUI exited, shutdown server
+            server_handle.abort();
+            result
+        }
+    }
 }

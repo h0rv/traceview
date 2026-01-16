@@ -383,6 +383,122 @@ impl Database {
 
         Ok(())
     }
+
+    /// Search sessions and spans by text query.
+    ///
+    /// Uses LIKE queries for simplicity. Searches session names and span content.
+    pub async fn search(&self, query: &str, limit: i64) -> Result<crate::models::SearchResult> {
+        use crate::models::{SearchResult, SessionMatch, SpanMatch};
+
+        let search_pattern = format!("%{query}%");
+
+        // Search sessions by name
+        let session_rows =
+            sqlx::query("SELECT id, name, created_at, updated_at FROM sessions WHERE name LIKE ? ORDER BY updated_at DESC LIMIT ?")
+                .bind(&search_pattern)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?;
+
+        let sessions: Vec<SessionMatch> = session_rows
+            .into_iter()
+            .map(|r| {
+                let name: Option<String> = r.get("name");
+                SessionMatch {
+                    session: Session {
+                        id: r.get("id"),
+                        name: name.clone(),
+                        created_at: r.get("created_at"),
+                        updated_at: r.get("updated_at"),
+                    },
+                    snippet: name.unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        // Search spans by content or tool_name
+        let span_rows = sqlx::query(
+            r#"
+            SELECT id, session_id, parent_span_id, trace_id, kind, model, content,
+                   metadata, start_time, end_time, duration_ms, input_tokens,
+                   output_tokens, finish_reason, tool_call_id, tool_name
+            FROM spans
+            WHERE content LIKE ? OR tool_name LIKE ?
+            ORDER BY start_time DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(&search_pattern)
+        .bind(&search_pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut spans = Vec::with_capacity(span_rows.len());
+        for r in span_rows {
+            let metadata_str: Option<String> = r.get("metadata");
+            let metadata = metadata_str.map(|s| serde_json::from_str(&s)).transpose()?;
+            let kind_str: String = r.get("kind");
+            let kind = deserialize_span_kind(&kind_str);
+            let content: Option<String> = r.get("content");
+            let tool_name: Option<String> = r.get("tool_name");
+
+            // Create snippet from content or tool_name
+            let snippet = content
+                .as_ref()
+                .map(|c| extract_snippet(c, query))
+                .or_else(|| tool_name.clone())
+                .unwrap_or_default();
+
+            spans.push(SpanMatch {
+                span: Span {
+                    id: r.get("id"),
+                    session_id: r.get("session_id"),
+                    parent_span_id: r.get("parent_span_id"),
+                    trace_id: r.get("trace_id"),
+                    kind,
+                    model: r.get("model"),
+                    content,
+                    metadata,
+                    start_time: r.get("start_time"),
+                    end_time: r.get("end_time"),
+                    duration_ms: r.get("duration_ms"),
+                    input_tokens: r.get("input_tokens"),
+                    output_tokens: r.get("output_tokens"),
+                    finish_reason: r.get("finish_reason"),
+                    tool_call_id: r.get("tool_call_id"),
+                    tool_name,
+                },
+                snippet,
+            });
+        }
+
+        Ok(SearchResult { sessions, spans })
+    }
+}
+
+/// Extract a snippet around the query match in the content.
+fn extract_snippet(content: &str, query: &str) -> String {
+    let lower_content = content.to_lowercase();
+    let lower_query = query.to_lowercase();
+
+    if let Some(pos) = lower_content.find(&lower_query) {
+        let start = pos.saturating_sub(40);
+        let end = (pos + query.len() + 40).min(content.len());
+
+        let mut snippet = String::new();
+        if start > 0 {
+            snippet.push_str("...");
+        }
+        snippet.push_str(&content[start..end]);
+        if end < content.len() {
+            snippet.push_str("...");
+        }
+        snippet
+    } else {
+        // No match found, return truncated content
+        if content.len() > 80 { format!("{}...", &content[..80]) } else { content.to_string() }
+    }
 }
 
 /// Serialize SpanKind to string for database storage.

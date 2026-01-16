@@ -37,7 +37,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTML templating
 maud = { version = "0.26", features = ["axum"] }
@@ -45,6 +45,13 @@ maud = { version = "0.26", features = ["axum"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# TUI
+iocraft = "0.7"
+futures = "0.3"
+
+[[bin]]
+name = "tv"
+path = "src/main.rs"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }

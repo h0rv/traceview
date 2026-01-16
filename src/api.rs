@@ -13,12 +13,14 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
+use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use std::collections::HashMap;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
@@ -27,7 +29,7 @@ use tower_http::trace::TraceLayer;
 use crate::db::Database;
 use crate::error::TraceviewError;
 use crate::ingest::{OtlpTraceData, convert_otlp, convert_otlp_proto, extract_session_name};
-use crate::models::{Session, Span};
+use crate::models::{ExportSummary, SearchResult, Session, SessionExport, Span, SpanKind};
 use crate::views::{app_layout, session_detail, sidebar_session_list, span_html};
 
 // ============================================================================
@@ -91,6 +93,8 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/spans", get(get_session_spans))
+        .route("/api/sessions/{id}/export", get(export_session))
+        .route("/api/search", get(search))
         // SSE streams
         .route("/stream", get(stream_all))
         .route("/sessions/{id}/stream", get(stream_session))
@@ -208,6 +212,115 @@ async fn get_session_spans(
 ) -> Result<Json<Vec<Span>>, ApiError> {
     let spans = state.db.get_spans_by_session(&id).await?;
     Ok(Json(spans))
+}
+
+/// Export a session with all spans as JSON for download.
+async fn export_session(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Fetch session
+    let session = state.db.get_session(&id).await?.ok_or_else(|| TraceviewError::InvalidSpan {
+        reason: format!("session not found: {id}"),
+    })?;
+
+    // Fetch all spans
+    let spans = state.db.get_spans_by_session(&id).await?;
+
+    // Calculate summary
+    let summary = calculate_export_summary(&spans);
+
+    // Get current timestamp
+    let exported_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+
+    // Build export structure
+    let export = SessionExport { export_version: "1.0", exported_at, session, spans, summary };
+
+    // Serialize to pretty JSON
+    let json = serde_json::to_string_pretty(&export)?;
+
+    // Generate filename
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let safe_id = sanitize_filename(&id);
+    let filename = format!("traceview-{safe_id}-{timestamp}.json");
+
+    // Return with download headers
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+        ],
+        json,
+    ))
+}
+
+/// Calculate export summary statistics from spans.
+fn calculate_export_summary(spans: &[Span]) -> ExportSummary {
+    let mut span_kinds: HashMap<String, usize> = HashMap::new();
+    let mut total_input = 0i64;
+    let mut total_output = 0i64;
+    let mut total_duration = 0i64;
+
+    for span in spans {
+        *span_kinds.entry(span_kind_to_string(span.kind).to_string()).or_default() += 1;
+        total_input += span.input_tokens.unwrap_or(0);
+        total_output += span.output_tokens.unwrap_or(0);
+        if let Some(d) = span.duration_ms {
+            total_duration += d;
+        }
+    }
+
+    ExportSummary {
+        span_count: spans.len(),
+        total_input_tokens: total_input,
+        total_output_tokens: total_output,
+        total_duration_ms: if total_duration > 0 { Some(total_duration) } else { None },
+        span_kinds,
+    }
+}
+
+/// Convert SpanKind to string for export.
+fn span_kind_to_string(kind: SpanKind) -> &'static str {
+    match kind {
+        SpanKind::User => "user",
+        SpanKind::Assistant => "assistant",
+        SpanKind::System => "system",
+        SpanKind::Thinking => "thinking",
+        SpanKind::ToolCall => "tool_call",
+        SpanKind::ToolResult => "tool_result",
+        SpanKind::Choice => "choice",
+        SpanKind::Span => "span",
+    }
+}
+
+/// Sanitize session ID for use in filename.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(50)
+        .collect()
+}
+
+/// Query parameters for search.
+#[derive(Debug, Deserialize)]
+pub struct SearchParams {
+    /// Search query string.
+    pub q: String,
+    /// Maximum results to return.
+    pub limit: Option<i64>,
+}
+
+/// Search sessions and spans by text query.
+async fn search(
+    State(state): State<SharedState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<SearchResult>, ApiError> {
+    let limit = params.limit.unwrap_or(20);
+    let results = state.db.search(&params.q, limit).await?;
+    Ok(Json(results))
 }
 
 /// SSE data format - includes both span data and pre-rendered HTML.

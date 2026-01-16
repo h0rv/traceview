@@ -2,8 +2,133 @@
 
 use chrono::{TimeZone, Utc};
 use maud::{Markup, html};
+use serde_json::Value;
 
 use crate::models::{Session, Span, SpanKind};
+
+// =============================================================================
+// Message Parsing (from OTEL GenAI metadata)
+// =============================================================================
+
+/// A parsed message from OTEL GenAI format.
+#[derive(Debug, Clone)]
+struct ParsedMessage {
+    /// Role: "system", "user", or "assistant"
+    role: String,
+    /// Text content of the message
+    content: String,
+    /// Tool calls embedded in assistant messages
+    tool_calls: Vec<ParsedToolCall>,
+}
+
+/// A tool call parsed from assistant message.
+#[derive(Debug, Clone)]
+struct ParsedToolCall {
+    name: String,
+    arguments: String,
+}
+
+/// Check if a span has embedded messages in metadata.
+fn has_embedded_messages(span: &Span) -> bool {
+    span.metadata.as_ref().is_some_and(|m| {
+        m.get("gen_ai.input.messages").is_some() || m.get("gen_ai.output.messages").is_some()
+    })
+}
+
+/// Parse messages from span metadata (gen_ai.input.messages and gen_ai.output.messages).
+fn parse_messages_from_metadata(span: &Span) -> Vec<ParsedMessage> {
+    let mut messages = Vec::new();
+    let Some(metadata) = &span.metadata else {
+        return messages;
+    };
+
+    // Parse input messages (system, user)
+    if let Some(input) = metadata.get("gen_ai.input.messages") {
+        messages.extend(parse_message_array(input));
+    }
+
+    // Parse output messages (assistant response)
+    if let Some(output) = metadata.get("gen_ai.output.messages") {
+        messages.extend(parse_message_array(output));
+    }
+
+    messages
+}
+
+/// Parse a JSON value containing an array of messages.
+fn parse_message_array(value: &Value) -> Vec<ParsedMessage> {
+    // Value is typically a JSON string containing an array
+    let Some(json_str) = value.as_str() else {
+        return Vec::new();
+    };
+
+    let arr: Vec<Value> = match serde_json::from_str(json_str) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    arr.iter()
+        .filter_map(|msg| {
+            let role = msg.get("role")?.as_str()?.to_string();
+            let parts = msg.get("parts")?.as_array()?;
+
+            let mut content_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+
+            for part in parts {
+                match part.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(text) = part.get("content").and_then(|c| c.as_str()) {
+                            content_parts.push(text.to_string());
+                        }
+                    }
+                    Some("tool_call") => {
+                        let name = part
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let arguments = part
+                            .get("arguments")
+                            .map(|v| {
+                                if v.is_string() {
+                                    v.as_str().unwrap_or("").to_string()
+                                } else {
+                                    serde_json::to_string(v).unwrap_or_default()
+                                }
+                            })
+                            .unwrap_or_default();
+                        tool_calls.push(ParsedToolCall { name, arguments });
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(ParsedMessage { role, content: content_parts.join("\n"), tool_calls })
+        })
+        .collect()
+}
+
+/// Truncate text to a maximum length, adding ellipsis if needed.
+fn truncate_text(text: &str, max_len: usize) -> String {
+    let text = text.trim();
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("{}…", &text[..max_len.saturating_sub(1)])
+    }
+}
+
+/// Extract cost from span metadata.
+fn extract_cost(span: &Span) -> Option<f64> {
+    span.metadata.as_ref()?.get("operation.cost")?.as_f64()
+}
+
+/// Format model name to be more compact (strip provider prefix if present).
+fn format_model_name(model: &str) -> &str {
+    // Strip common prefixes like "anthropic:" or "openai:"
+    model.split(':').next_back().unwrap_or(model)
+}
 
 /// The role of a conversation turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +256,133 @@ fn turn_html(turn: &ConversationTurn) -> Markup {
     html! {
         div class=(turn_class) {
             @for span in &turn.spans {
-                (span_html(span))
+                @if span.kind == SpanKind::Assistant && has_embedded_messages(span) {
+                    // Expand assistant span to show individual messages
+                    (render_expanded_messages(span))
+                } @else {
+                    (span_html(span))
+                }
+            }
+        }
+    }
+}
+
+/// Renders expanded messages from an assistant span's metadata.
+fn render_expanded_messages(span: &Span) -> Markup {
+    let messages = parse_messages_from_metadata(span);
+
+    html! {
+        @for msg in &messages {
+            (render_message_span(&msg, span))
+        }
+    }
+}
+
+/// Renders a single parsed message as a span-like element.
+fn render_message_span(msg: &ParsedMessage, parent_span: &Span) -> Markup {
+    let kind_str = msg.role.to_uppercase();
+    let preview = truncate_text(&msg.content, 150);
+    let data_kind = msg.role.as_str();
+
+    html! {
+        div class="span expandable-span"
+            data-kind=(data_kind)
+            data-expandable="true" {
+
+            div class="span-header" {
+                div class="span-header-left" {
+                    span class="span-kind" { (kind_str) }
+                    span class="expand-icon" { "▸" }
+                }
+
+                // Show model/tokens only for assistant
+                @if msg.role == "assistant" {
+                    div class="span-meta" {
+                        @if let Some(model) = &parent_span.model {
+                            small { (format_model_name(model)) }
+                        }
+                        @if let Some(duration_ms) = parent_span.duration_ms {
+                            small { " · " (format_duration(duration_ms)) }
+                        }
+                        @if let Some(input) = parent_span.input_tokens {
+                            small { " · " (input) " in" }
+                        }
+                        @if let Some(output) = parent_span.output_tokens {
+                            small { " / " (output) " out" }
+                        }
+                    }
+                }
+            }
+
+            // Preview (shown when collapsed)
+            @if !preview.is_empty() {
+                div class="span-preview" { (preview) }
+            }
+
+            // Full content (hidden by default, shown on expand)
+            div class="span-detail hidden" {
+                div class="detail-content" { (msg.content) }
+
+                // Tool calls for assistant messages
+                @if !msg.tool_calls.is_empty() {
+                    div class="detail-section" {
+                        div class="detail-label" { "Tool Calls" }
+                        div class="tool-calls-list" {
+                            @for tc in &msg.tool_calls {
+                                div class="tool-call-item" {
+                                    code { (tc.name) }
+                                    span class="tool-args" { "(" (truncate_text(&tc.arguments, 60)) ")" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Metadata only for assistant
+                @if msg.role == "assistant" {
+                    (render_metadata_section(parent_span))
+                }
+            }
+        }
+    }
+}
+
+/// Renders the metadata section for a span.
+fn render_metadata_section(span: &Span) -> Markup {
+    html! {
+        div class="detail-section metadata-section" {
+            div class="detail-label" { "Metadata" }
+            div class="metadata-grid" {
+                @if let Some(model) = &span.model {
+                    div class="meta-row" {
+                        span class="meta-key" { "Model" }
+                        span class="meta-value" { (model) }
+                    }
+                }
+                @if let Some(input) = span.input_tokens {
+                    div class="meta-row" {
+                        span class="meta-key" { "Input tokens" }
+                        span class="meta-value" { (input) }
+                    }
+                }
+                @if let Some(output) = span.output_tokens {
+                    div class="meta-row" {
+                        span class="meta-key" { "Output tokens" }
+                        span class="meta-value" { (output) }
+                    }
+                }
+                @if let Some(cost) = extract_cost(span) {
+                    div class="meta-row" {
+                        span class="meta-key" { "Cost" }
+                        span class="meta-value" { (format!("${cost:.4}")) }
+                    }
+                }
+                @if let Some(reason) = &span.finish_reason {
+                    div class="meta-row" {
+                        span class="meta-key" { "Finish reason" }
+                        span class="meta-value" { (reason) }
+                    }
+                }
             }
         }
     }
@@ -168,7 +419,17 @@ pub fn session_detail(session: &Session, spans: &[Span]) -> Markup {
     html! {
         // Session header with name and token summary
         div class="session-header" {
-            h2 { (display_name) }
+            div class="session-header-top" {
+                h2 { (display_name) }
+                a href={ "/api/sessions/" (session.id) "/export" }
+                    class="export-btn"
+                    title="Download session as JSON"
+                    download {
+                    // Download icon SVG
+                    (maud::PreEscaped(r#"<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>"#))
+                    " Export"
+                }
+            }
             (token_summary_html(&summary))
             div class="session-info" {
                 p { "Session ID: " code { (session.id) } }
@@ -259,7 +520,7 @@ fn extract_tool_content(span: &Span) -> Option<(Option<String>, Option<String>)>
     if args.is_some() || response.is_some() { Some((args, response)) } else { None }
 }
 
-/// Renders a tool span (ToolCall or ToolResult) with collapsible details/summary.
+/// Renders a tool span (ToolCall or ToolResult) with expandable details.
 fn tool_span_html(span: &Span, kind_str: &str) -> Markup {
     let tool_name = span.tool_name.as_deref().unwrap_or("unknown");
 
@@ -275,47 +536,59 @@ fn tool_span_html(span: &Span, kind_str: &str) -> Markup {
         };
     }
 
-    // Gear emoji for tool_call, outbox tray emoji for tool_result
-    let icon = if span.kind == SpanKind::ToolCall { "\u{2699}\u{fe0f}" } else { "\u{1f4e4}" };
     let has_error = is_error_span(span);
 
     // Extract tool content from metadata or use span content
     let (args, response) = extract_tool_content(span).unwrap_or((None, None));
-    let display_content = span.content.clone().or_else(|| args.clone()).or(response.clone());
+    let args_preview = args.as_ref().map(|a| truncate_text(a, 60));
 
     html! {
-        div class="span"
+        div class="span tool-span expandable-span"
             data-kind=(kind_str)
             data-span-id=(span.id)
             data-start-time=(span.start_time)
             data-end-time=(span.end_time.map(|t| t.to_string()).unwrap_or_default())
-            data-has-error=(if has_error { "true" } else { "false" }) {
+            data-has-error=(if has_error { "true" } else { "false" })
+            data-expandable="true" {
 
-            details class="tool-details" {
-                summary class="tool-summary" {
-                    (icon) " " code { (tool_name) }
-                    @if let Some(duration_ms) = span.duration_ms {
-                        small { " " (format_duration(duration_ms)) }
+            div class="span-header" {
+                div class="span-header-left" {
+                    span class="expand-icon" { "▸" }
+                    code class="tool-name" { (tool_name) }
+                    @if let Some(preview) = &args_preview {
+                        span class="tool-args-preview" { "(" (preview) ")" }
                     }
                 }
-                div class="tool-content" {
-                    @if let Some(args) = &args {
-                        div {
-                            strong { "Args: " }
-                            pre { code { (args) } }
-                        }
+                div class="span-meta" {
+                    @if let Some(duration_ms) = span.duration_ms {
+                        small { (format_duration(duration_ms)) }
                     }
-                    @if let Some(response) = &response {
-                        div {
-                            strong { "Response: " }
-                            pre { code { (response) } }
-                        }
+                }
+            }
+
+            // Expandable detail
+            div class="span-detail hidden" {
+                @if let Some(args) = &args {
+                    div class="detail-section" {
+                        div class="detail-label" { "Arguments" }
+                        pre class="detail-code" { (args) }
                     }
-                    @if args.is_none() && response.is_none() {
-                        @if let Some(content) = &display_content {
-                            pre { code { (content) } }
-                        } @else {
-                            small { "No content" }
+                }
+                @if let Some(response) = &response {
+                    div class="detail-section" {
+                        div class="detail-label" { "Response" }
+                        pre class="detail-code" { (response) }
+                    }
+                }
+                @if args.is_none() && response.is_none() {
+                    @if let Some(content) = &span.content {
+                        div class="detail-section" {
+                            div class="detail-label" { "Content" }
+                            pre class="detail-code" { (content) }
+                        }
+                    } @else {
+                        div class="detail-section" {
+                            small class="no-content" { "No content available" }
                         }
                     }
                 }
@@ -472,8 +745,8 @@ mod tests {
 
         assert!(html_str.contains("data-kind=\"tool_call\""));
         assert!(html_str.contains("web_search"));
-        // Tool call ID shown in simplified structure
-        assert!(html_str.contains("<code>web_search</code>"));
+        // Tool name shown in code element with class
+        assert!(html_str.contains("class=\"tool-name\""));
     }
 
     #[test]
@@ -711,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn test_span_html_tool_call_uses_details_element() {
+    fn test_span_html_tool_call_uses_expandable_structure() {
         let mut span = create_test_span(SpanKind::ToolCall);
         span.tool_name = Some("read_file".to_string());
         span.tool_call_id = Some("call-123".to_string());
@@ -720,16 +993,16 @@ mod tests {
         let result = span_html(&span);
         let html_str = result.into_string();
 
-        // Verify details/summary structure
-        assert!(html_str.contains("<details class=\"tool-details\">"));
-        assert!(html_str.contains("<summary class=\"tool-summary\">"));
-        assert!(html_str.contains("tool-content"));
+        // Verify expandable span structure
+        assert!(html_str.contains("expandable-span"));
+        assert!(html_str.contains("span-detail"));
+        assert!(html_str.contains("expand-icon"));
 
-        // Verify tool name is present with icon
+        // Verify tool name is present
         assert!(html_str.contains("read_file"));
-        assert!(html_str.contains("\u{2699}")); // Gear emoji
+        assert!(html_str.contains("tool-name"));
 
-        // Verify content is in pre/code block
+        // Verify content is in detail section
         assert!(html_str.contains("file contents here"));
 
         // Verify duration is shown
@@ -737,10 +1010,11 @@ mod tests {
 
         // Verify data attributes still work
         assert!(html_str.contains("data-kind=\"tool_call\""));
+        assert!(html_str.contains("data-expandable=\"true\""));
     }
 
     #[test]
-    fn test_span_html_tool_result_uses_details_element() {
+    fn test_span_html_tool_result_uses_expandable_structure() {
         let mut span = create_test_span(SpanKind::ToolResult);
         span.tool_name = Some("bash".to_string());
         span.content = Some("command output".to_string());
@@ -749,16 +1023,16 @@ mod tests {
         let result = span_html(&span);
         let html_str = result.into_string();
 
-        // Verify details/summary structure
-        assert!(html_str.contains("<details class=\"tool-details\">"));
-        assert!(html_str.contains("<summary class=\"tool-summary\">"));
-        assert!(html_str.contains("tool-content"));
+        // Verify expandable span structure
+        assert!(html_str.contains("expandable-span"));
+        assert!(html_str.contains("span-detail"));
+        assert!(html_str.contains("expand-icon"));
 
-        // Verify tool name is present with icon
+        // Verify tool name is present
         assert!(html_str.contains("bash"));
-        assert!(html_str.contains("\u{1f4e4}")); // Outbox emoji for tool_result
+        assert!(html_str.contains("tool-name"));
 
-        // Verify content is in pre/code block
+        // Verify content is in detail section
         assert!(html_str.contains("command output"));
 
         // Verify duration
@@ -766,6 +1040,7 @@ mod tests {
 
         // Verify data attributes
         assert!(html_str.contains("data-kind=\"tool_result\""));
+        assert!(html_str.contains("data-expandable=\"true\""));
     }
 
     #[test]
@@ -825,13 +1100,13 @@ mod tests {
         let result = span_html(&span);
         let html_str = result.into_string();
 
-        // Content should be in tool-content div
-        assert!(html_str.contains("tool-content"));
+        // Content should be in span-detail section
+        assert!(html_str.contains("span-detail"));
         assert!(html_str.contains("file contents"));
     }
 
     #[test]
-    fn test_tool_span_has_content_div_always() {
+    fn test_tool_span_has_detail_section_always() {
         let mut span = create_test_span(SpanKind::ToolCall);
         span.tool_name = Some("read_file".to_string());
         span.content = None;
@@ -839,9 +1114,9 @@ mod tests {
         let result = span_html(&span);
         let html_str = result.into_string();
 
-        // tool-content div always present for consistent structure
-        assert!(html_str.contains("tool-content"));
-        assert!(html_str.contains("No content"));
+        // span-detail div always present for consistent structure
+        assert!(html_str.contains("span-detail"));
+        assert!(html_str.contains("No content available"));
     }
 
     #[test]

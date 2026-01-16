@@ -21,10 +21,10 @@ Usage:
     uv run scripts/send_traces.py --count 5
 """
 
+import random
 import sys
 import time
 import uuid
-import random
 from typing import Any
 
 import httpx
@@ -122,7 +122,14 @@ def generate_conversation(fixed_session_id: str | None = None) -> dict:
     ]
 
     scenario = random.choice(scenarios)
-    model = random.choice(["claude-3-opus-20240229", "claude-3-sonnet-20240229", "gpt-4-turbo", "claude-sonnet-4-20250514"])
+    model = random.choice(
+        [
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "gpt-4-turbo",
+            "claude-sonnet-4-20250514",
+        ]
+    )
 
     # Build spans and events
     spans = []
@@ -135,62 +142,74 @@ def generate_conversation(fixed_session_id: str | None = None) -> dict:
     events = []
 
     # User message event
-    events.append(make_event(
-        "gen_ai.user.message",
-        ns_timestamp(10),
-        [make_attr("gen_ai.content", scenario["user_msg"])]
-    ))
+    events.append(
+        make_event(
+            "gen_ai.user.message",
+            ns_timestamp(10),
+            [make_attr("gen_ai.content", scenario["user_msg"])],
+        )
+    )
 
     # Thinking event (extended thinking)
-    events.append(make_event(
-        "gen_ai.thinking",
-        ns_timestamp(100),
-        [make_attr("gen_ai.content", scenario["thinking"])]
-    ))
+    events.append(
+        make_event(
+            "gen_ai.thinking",
+            ns_timestamp(100),
+            [make_attr("gen_ai.content", scenario["thinking"])],
+        )
+    )
 
     # Tool call and result if applicable
     if scenario["tool_name"]:
         tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
 
         # Tool call event
-        events.append(make_event(
-            "gen_ai.tool.message",
-            ns_timestamp(200),
-            [
-                make_attr("gen_ai.tool.name", scenario["tool_name"]),
-                make_attr("gen_ai.tool.call.id", tool_call_id),
-                make_attr("gen_ai.content", scenario["tool_input"]),
-                make_attr("tool_calls", "true"),
-            ]
-        ))
+        events.append(
+            make_event(
+                "gen_ai.tool.message",
+                ns_timestamp(200),
+                [
+                    make_attr("gen_ai.tool.name", scenario["tool_name"]),
+                    make_attr("gen_ai.tool.call.id", tool_call_id),
+                    make_attr("gen_ai.content", scenario["tool_input"]),
+                    make_attr("tool_calls", "true"),
+                ],
+            )
+        )
 
         # Tool result event
-        events.append(make_event(
-            "gen_ai.tool.message",
-            ns_timestamp(500),
-            [
-                make_attr("gen_ai.tool.name", scenario["tool_name"]),
-                make_attr("gen_ai.tool.call.id", tool_call_id),
-                make_attr("gen_ai.content", scenario["tool_output"]),
-            ]
-        ))
+        events.append(
+            make_event(
+                "gen_ai.tool.message",
+                ns_timestamp(500),
+                [
+                    make_attr("gen_ai.tool.name", scenario["tool_name"]),
+                    make_attr("gen_ai.tool.call.id", tool_call_id),
+                    make_attr("gen_ai.content", scenario["tool_output"]),
+                ],
+            )
+        )
 
     # Assistant message event
-    events.append(make_event(
-        "gen_ai.assistant.message",
-        ns_timestamp(800),
-        [make_attr("gen_ai.content", scenario["assistant_msg"])]
-    ))
+    events.append(
+        make_event(
+            "gen_ai.assistant.message",
+            ns_timestamp(800),
+            [make_attr("gen_ai.content", scenario["assistant_msg"])],
+        )
+    )
 
     # Choice event
-    events.append(make_event(
-        "gen_ai.choice",
-        ns_timestamp(850),
-        [
-            make_attr("index", 0),
-            make_attr("gen_ai.finish_reason", "end_turn"),
-        ]
-    ))
+    events.append(
+        make_event(
+            "gen_ai.choice",
+            ns_timestamp(850),
+            [
+                make_attr("index", 0),
+                make_attr("gen_ai.finish_reason", "end_turn"),
+            ],
+        )
+    )
 
     # Build root span
     input_tokens = random.randint(50, 500)
@@ -217,19 +236,23 @@ def generate_conversation(fixed_session_id: str | None = None) -> dict:
     spans.append(root_span)
 
     return {
-        "resourceSpans": [{
-            "resource": {
-                "attributes": [
-                    make_attr("service.name", "demo-agent"),
-                    make_attr("service.version", "1.0.0"),
-                    make_attr("session.id", session_id),
-                ]
-            },
-            "scopeSpans": [{
-                "scope": {"name": "pydantic-ai"},
-                "spans": spans,
-            }]
-        }]
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        make_attr("service.name", "demo-agent"),
+                        make_attr("service.version", "1.0.0"),
+                        make_attr("session.id", session_id),
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "pydantic-ai"},
+                        "spans": spans,
+                    }
+                ],
+            }
+        ]
     }
 
 
@@ -257,39 +280,55 @@ def send_single_event(session_id: str, event_type: str, content: str, **kwargs) 
         event_attrs.append(make_attr("tool_calls", "true"))
         if "tool_name" in kwargs:
             event_attrs.append(make_attr("gen_ai.tool.name", kwargs["tool_name"]))
-            event_attrs.append(make_attr("gen_ai.tool.call.id", f"call_{uuid.uuid4().hex[:8]}"))
+            event_attrs.append(
+                make_attr("gen_ai.tool.call.id", f"call_{uuid.uuid4().hex[:8]}")
+            )
     elif event_type == "tool_result" and "tool_name" in kwargs:
         event_attrs.append(make_attr("gen_ai.tool.name", kwargs["tool_name"]))
 
     # Build the trace
     trace_data = {
-        "resourceSpans": [{
-            "resource": {
-                "attributes": [make_attr("session.id", session_id)]
-            },
-            "scopeSpans": [{
-                "scope": {"name": "demo"},
-                "spans": [{
-                    "traceId": trace_id,
-                    "spanId": span_id,
-                    "name": event_type,
-                    "startTimeUnixNano": now_ns,
-                    "endTimeUnixNano": ns_timestamp(100),
-                    "attributes": [
-                        make_attr("gen_ai.system", "anthropic"),
-                        make_attr("gen_ai.request.model", kwargs.get("model", "claude-sonnet-4-20250514")),
-                    ],
-                    "events": [{
-                        "name": event_name,
-                        "timeUnixNano": now_ns,
-                        "attributes": event_attrs,
-                    }]
-                }]
-            }]
-        }]
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [make_attr("session.id", session_id)]},
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "demo"},
+                        "spans": [
+                            {
+                                "traceId": trace_id,
+                                "spanId": span_id,
+                                "name": event_type,
+                                "startTimeUnixNano": now_ns,
+                                "endTimeUnixNano": ns_timestamp(100),
+                                "attributes": [
+                                    make_attr("gen_ai.system", "anthropic"),
+                                    make_attr(
+                                        "gen_ai.request.model",
+                                        kwargs.get("model", "claude-sonnet-4-20250514"),
+                                    ),
+                                ],
+                                "events": [
+                                    {
+                                        "name": event_name,
+                                        "timeUnixNano": now_ns,
+                                        "attributes": event_attrs,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
     }
 
-    httpx.post(TRACEVIEW_URL, json=trace_data, headers={"Content-Type": "application/json"}, timeout=10)
+    httpx.post(
+        TRACEVIEW_URL,
+        json=trace_data,
+        headers={"Content-Type": "application/json"},
+        timeout=10,
+    )
 
 
 def simulate_conversation(session_id: str) -> None:
@@ -330,7 +369,7 @@ def simulate_conversation(session_id: str) -> None:
     time.sleep(random.uniform(0.3, 0.6))
 
     # Thinking (simulated delay for "reasoning")
-    print(f"  🧠 Thinking...")
+    print("  🧠 Thinking...")
     send_single_event(session_id, "thinking", scenario["thinking"])
     time.sleep(random.uniform(0.8, 1.5))
 
@@ -338,39 +377,43 @@ def simulate_conversation(session_id: str) -> None:
     if scenario.get("tool_name"):
         print(f"  🔧 Tool call: {scenario['tool_name']}")
         send_single_event(
-            session_id, "tool_call",
+            session_id,
+            "tool_call",
             scenario["tool_input"],
-            tool_name=scenario["tool_name"]
+            tool_name=scenario["tool_name"],
         )
         time.sleep(random.uniform(0.4, 0.8))
 
         # Tool result
-        print(f"  📥 Tool result received")
+        print("  📥 Tool result received")
         send_single_event(
-            session_id, "tool_result",
+            session_id,
+            "tool_result",
             scenario["tool_output"],
-            tool_name=scenario["tool_name"]
+            tool_name=scenario["tool_name"],
         )
         time.sleep(random.uniform(0.2, 0.4))
 
     # Assistant response (simulate token streaming with chunks)
-    print(f"  🤖 Assistant responding...")
+    print("  🤖 Assistant responding...")
     response = scenario["assistant"]
 
     # Split response into chunks to simulate streaming
     chunk_size = random.randint(50, 100)
-    chunks = [response[i:i+chunk_size] for i in range(0, len(response), chunk_size)]
+    chunks = [response[i : i + chunk_size] for i in range(0, len(response), chunk_size)]
 
     for j, _chunk in enumerate(chunks):
         # Send partial response
-        partial = response[:((j + 1) * chunk_size)]
+        partial = response[: ((j + 1) * chunk_size)]
         send_single_event(session_id, "assistant", partial)
         time.sleep(random.uniform(0.1, 0.3))  # Token generation delay
 
     print(f"  ✅ Response complete ({len(response)} chars)")
 
 
-def send_traces(count: int = 3, fixed_session_id: str | None = None, streaming: bool = True) -> None:
+def send_traces(
+    count: int = 3, fixed_session_id: str | None = None, streaming: bool = True
+) -> None:
     """Send multiple conversation traces to traceview.
 
     Args:
@@ -382,9 +425,9 @@ def send_traces(count: int = 3, fixed_session_id: str | None = None, streaming: 
         # Use the new streaming simulation
         print(f"🎬 Simulating {count} streaming conversation(s)...")
         for i in range(count):
-            print(f"\n{'='*50}")
-            print(f"Conversation {i+1}/{count}")
-            print('='*50)
+            print(f"\n{'=' * 50}")
+            print(f"Conversation {i + 1}/{count}")
+            print("=" * 50)
             simulate_conversation(fixed_session_id)
             if i < count - 1:
                 time.sleep(1.0)  # Pause between conversations
@@ -414,34 +457,46 @@ def send_traces(count: int = 3, fixed_session_id: str | None = None, streaming: 
             if spans:
                 span = spans[0]
                 session_id = next(
-                    (a["value"].get("stringValue", "") for a in span["attributes"] if a["key"] == "session.id"),
-                    "unknown"
+                    (
+                        a["value"].get("stringValue", "")
+                        for a in span["attributes"]
+                        if a["key"] == "session.id"
+                    ),
+                    "unknown",
                 )
                 model = next(
-                    (a["value"].get("stringValue", "") for a in span["attributes"] if a["key"] == "gen_ai.request.model"),
-                    "unknown"
+                    (
+                        a["value"].get("stringValue", "")
+                        for a in span["attributes"]
+                        if a["key"] == "gen_ai.request.model"
+                    ),
+                    "unknown",
                 )
                 user_msg = ""
                 for event in span.get("events", []):
                     if event["name"] == "gen_ai.user.message":
                         user_msg = next(
-                            (a["value"].get("stringValue", "")[:50] for a in event["attributes"] if a["key"] == "gen_ai.content"),
-                            ""
+                            (
+                                a["value"].get("stringValue", "")[:50]
+                                for a in event["attributes"]
+                                if a["key"] == "gen_ai.content"
+                            ),
+                            "",
                         )
                         break
 
-                print(f"  ✓ [{i+1}/{count}] Session: {session_id}, Model: {model}")
+                print(f"  ✓ [{i + 1}/{count}] Session: {session_id}, Model: {model}")
                 print(f"              User: {user_msg}...")
         except httpx.HTTPStatusError as e:
-            print(f"  ✗ [{i+1}/{count}] HTTP error: {e.response.status_code}")
+            print(f"  ✗ [{i + 1}/{count}] HTTP error: {e.response.status_code}")
         except httpx.RequestError as e:
-            print(f"  ✗ [{i+1}/{count}] Request failed: {e}")
-            print(f"     Is traceview running? Start with: cargo run -- --port 6969")
+            print(f"  ✗ [{i + 1}/{count}] Request failed: {e}")
+            print("     Is traceview running? Start with: cargo run -- --port 6969")
             return
 
         time.sleep(0.2)  # Small delay between traces
 
-    print(f"\n✅ Done! View traces at http://localhost:6969/")
+    print("\n✅ Done! View traces at http://localhost:6969/")
 
 
 def main() -> None:
@@ -459,7 +514,9 @@ def main() -> None:
             try:
                 count = int(args[i + 1])
             except ValueError:
-                print("Usage: send_traces.py [--count N] [--session ID] [--stream] [--new]")
+                print(
+                    "Usage: send_traces.py [--count N] [--session ID] [--stream] [--new]"
+                )
                 sys.exit(1)
             i += 2
         elif args[i] == "--session" and i + 1 < len(args):

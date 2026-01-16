@@ -158,6 +158,82 @@ pub struct SpanEvent {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
+// ============================================================================
+// Export Types
+// ============================================================================
+
+/// Complete session export structure for JSON download.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionExport {
+    /// Export format version.
+    pub export_version: &'static str,
+
+    /// Timestamp when the export was generated (Unix nanoseconds).
+    pub exported_at: i64,
+
+    /// The session data.
+    pub session: Session,
+
+    /// All spans belonging to the session, ordered by start_time.
+    pub spans: Vec<Span>,
+
+    /// Summary statistics.
+    pub summary: ExportSummary,
+}
+
+/// Summary statistics for an exported session.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportSummary {
+    /// Total number of spans.
+    pub span_count: usize,
+
+    /// Total input tokens across all spans.
+    pub total_input_tokens: i64,
+
+    /// Total output tokens across all spans.
+    pub total_output_tokens: i64,
+
+    /// Total duration in milliseconds (sum of all span durations).
+    pub total_duration_ms: Option<i64>,
+
+    /// Count of spans by kind.
+    pub span_kinds: HashMap<String, usize>,
+}
+
+// ============================================================================
+// Search Types
+// ============================================================================
+
+/// Search result containing matching sessions and spans.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    /// Matching sessions.
+    pub sessions: Vec<SessionMatch>,
+
+    /// Matching spans.
+    pub spans: Vec<SpanMatch>,
+}
+
+/// A session match from search.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMatch {
+    /// The session data.
+    pub session: Session,
+
+    /// Snippet showing the match context.
+    pub snippet: String,
+}
+
+/// A span match from search.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanMatch {
+    /// The span data.
+    pub span: Span,
+
+    /// Snippet showing the match context.
+    pub snippet: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

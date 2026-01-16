@@ -1,0 +1,93 @@
+[project]
+name = "traceview"
+version = "0.1.0"
+description = "Local OpenTelemetry trace viewer for GenAI applications"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["opentelemetry", "tracing", "observability", "genai", "llm"]
+classifiers = []
+
+dependencies = []
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+full = [
+    "traceview[otel]",
+    "opentelemetry-instrumentation-requests>=0.40b0",
+    "opentelemetry-instrumentation-httpx>=0.40b0",
+]
+
+# uv dependency groups (preferred over optional-dependencies for dev)
+[dependency-groups]
+dev = [
+    "maturin>=1.0,<2.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.390",
+    "pytest>=8.0",
+    # Include otel for type checking
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rmarmarma/traceview"
+Repository = "https://github.com/rmarmarma/traceview"
+
+[tool.uv]
+# Rebuild when Rust source changes
+cache-keys = [
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
+]
+# IMPORTANT: Maturin bin bindings require non-editable installs for the binary.
+# Use: uv sync --no-editable  (or set UV_NO_EDITABLE=1)
+# See: https://github.com/astral-sh/uv/issues/8124 for pyproject.toml config support
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+python-source = "python"
+module-name = "traceview"
+strip = true
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+src = ["python"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["traceview"]
+
+[tool.pyright]
+pythonVersion = "3.9"
+include = ["python"]
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
