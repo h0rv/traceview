@@ -3,7 +3,7 @@
 A fast, local trace viewer for AI agent development. Single binary, zero config, works with any OpenTelemetry-instrumented AI framework.
 
 ```bash
-uvx trace-view
+uvx --from trace-view tv
 ```
 
 ## Why tv?
@@ -37,11 +37,12 @@ Production observability tools (Datadog, Jaeger) are overkill for local developm
 ## Installation
 
 ```bash
-# Run directly (no install)
-uvx trace-view
-
-# Or install globally
+# Install globally, then run
 uv tool install trace-view
+tv
+
+# Or run directly (no install)
+uvx --from trace-view tv
 
 # Or add to project
 uv add trace-view
@@ -66,7 +67,7 @@ uv add "trace-view[otel]"
 python my_agent.py
 ```
 
-Or run standalone: `uvx trace-view`
+Or run standalone: `uvx --from trace-view tv`
 
 ## CLI Usage
 
