@@ -52,23 +52,21 @@ cargo install traceview
 
 ## Quick Start
 
-```bash
-tv
-```
-
-Point your OTEL exporter to `http://localhost:4318/v1/traces` and open the web UI.
-
-Or use the Python context manager:
-
 ```python
-from traceview import Traceview
+import traceview
 
-with Traceview(configure_otel=True) as tv:
-    # your traced code here
-    pass
+traceview.init()  # starts server at http://localhost:4318, configures OTEL
+
+# your traced code runs normally
+run_my_agent()
 ```
 
-Requires `uv add traceview[otel]` for auto-configuration.
+```bash
+uv add "traceview[otel]"
+python my_agent.py
+```
+
+Or run standalone: `uvx traceview`
 
 ## CLI Usage
 

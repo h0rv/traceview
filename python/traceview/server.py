@@ -16,14 +16,13 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ._binary import get_binary_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from types import TracebackType
 
 
@@ -312,37 +311,31 @@ class Traceview:
         self.stop()
 
 
-@contextmanager
-def traceview_server(
+_instance: Traceview | None = None
+
+
+def init(
     port: int = 4318,
-    configure_otel: bool = False,
+    configure_otel: bool = True,
     session_id: str | None = None,
     db_path: str = "traces.db",
-    batch_size: int = 1000,
-    batch_interval_ms: int = 100,
-    startup_timeout: float = 5.0,
-) -> Iterator[Traceview]:
+) -> Traceview:
     """
-    Functional context manager for running a traceview server.
-
-    This is an alternative to using the Traceview class directly.
+    Start traceview server in background. Auto-stops on process exit.
 
     Example:
-        with traceview_server(configure_otel=True) as tv:
-            # Server is running
-            print(f"UI at {tv.ui_url}")
+        import traceview
+        traceview.init()
+        # traces now sent to http://localhost:4318
     """
-    tv = Traceview(
+    global _instance
+    if _instance is not None and _instance.is_running:
+        return _instance
+    _instance = Traceview(
         port=port,
         db_path=db_path,
-        batch_size=batch_size,
-        batch_interval_ms=batch_interval_ms,
-        startup_timeout=startup_timeout,
         configure_otel=configure_otel,
         session_id=session_id,
     )
-    try:
-        tv.start()
-        yield tv
-    finally:
-        tv.stop()
+    _instance.start()
+    return _instance
