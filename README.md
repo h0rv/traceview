@@ -3,7 +3,7 @@
 A fast, local trace viewer for AI agent development. Single binary, zero config, works with any OpenTelemetry-instrumented AI framework.
 
 ```bash
-cargo install traceview && tv
+uvx traceview
 ```
 
 ## Why tv?
@@ -30,45 +30,45 @@ Production observability tools (Datadog, Jaeger) are overkill for local developm
 
 **Timeline View** - Visual representation of span timing for performance analysis
 
-## Quick Start
+**Search** - Full-text search across span content
 
-### 1. Start tv
+**Export** - Export sessions to JSON for analysis or sharing
+
+## Installation
 
 ```bash
-# Build from source
-cargo build --release
-./target/release/tv
+# Run directly (no install)
+uvx traceview
 
-# Or install from crates.io (coming soon)
+# Or install globally
+uv tool install traceview
+
+# Or add to project
+uv add traceview
+
+# From source
 cargo install traceview
+```
+
+## Quick Start
+
+```bash
 tv
 ```
 
-### 2. Configure your AI framework
+Point your OTEL exporter to `http://localhost:4318/v1/traces` and open the web UI.
 
-Point your OpenTelemetry exporter to `http://localhost:4318/v1/traces`:
+Or use the Python context manager:
 
 ```python
-# pydantic-ai with logfire
-import logfire
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from traceview import Traceview
 
-exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
-logfire.configure(
-    send_to_logfire=False,
-    additional_span_processors=[BatchSpanProcessor(exporter)]
-)
-logfire.instrument_pydantic_ai()
+with Traceview(configure_otel=True) as tv:
+    # your traced code here
+    pass
 ```
 
-### 3. Run your agent
-
-```bash
-python my_agent.py
-```
-
-Open http://localhost:4318 to see your traces.
+Requires `uv add traceview[otel]` for auto-configuration.
 
 ## CLI Usage
 
@@ -106,6 +106,8 @@ TV_PORT=8080 TV_DB_PATH=my_traces.db tv serve
 
 - **Filter tabs**: All | Tools | Thoughts | Errors
 - **View modes**: Conversation (default) | Timeline
+- **Search**: Full-text search across spans
+- **Export**: Download sessions as JSON
 - **Dark/Light mode** toggle
 - **Real-time updates** via SSE
 - **Token summary** per session
@@ -144,7 +146,13 @@ This means all spans from a single script execution automatically group together
 ## Development
 
 ```bash
-# Build and check
+# Install dependencies (use --no-editable for binary)
+uv sync --no-editable
+
+# Run the binary
+.venv/bin/tv
+
+# Build Rust directly
 cargo build
 
 # Run tests
@@ -154,6 +162,10 @@ cargo test
 cargo cl        # strict clippy
 cargo t         # tests
 cargo fmt --check
+
+# Python checks
+uv run ruff check python/
+uv run pyright python/
 ```
 
 ## License
@@ -162,9 +174,9 @@ MIT
 
 ## Roadmap
 
-- [ ] Full-text search
-- [ ] Export to JSON
-- [ ] Python package for easy local dev
+- [x] Full-text search
+- [x] Export to JSON
+- [x] Python package
 - [ ] Pre-built binaries
 - [ ] Cost tracking
 - [ ] Span diff mode
