@@ -31,10 +31,10 @@ from ._binary import get_binary_path, run_binary
 from .server import Traceview, TraceviewError, init
 
 __all__ = [
-    "init",
     "Traceview",
     "TraceviewError",
     "get_binary_path",
+    "init",
     "run_binary",
 ]
 
